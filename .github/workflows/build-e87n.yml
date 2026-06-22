@@ -1,0 +1,167 @@
+name: Build E87N ImmortalWrt 6.6 Firmware
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - mt798x-mt799x-6.6-mtwifi
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: mt798x-mt799x-6.6-mtwifi
+
+      - name: Install build dependencies
+        run: |
+          sudo apt update && sudo apt full-upgrade -y
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+          ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      - name: Custom DTS for EdgePi E87N (fan + SPI bus)
+        run: |
+          DTS_DIR="target/linux/mediatek/files-6.6/arch/arm64/boot/dts/mediatek"
+          DTS_FILE="$DTS_DIR/mt7987-edgepi-e87n.dts"
+          
+          # 列出所有MT7987原生模板，运行后可在日志中确认
+          echo "=== 内核内置MT7987设备树列表 ==="
+          ls -la $DTS_DIR/mt7987*.dts
+          echo "=================================="
+          
+          # 使用MT7987官方参考板模板（外设寄存器与E87N完全匹配）
+          cp $DTS_DIR/mt7987-rfb.dts "$DTS_FILE"
+          
+          # 修改设备标识与兼容字符串
+          sed -i 's/mediatek,mt7987-rfb/edgepi,e87n/g' "$DTS_FILE"
+          sed -i 's/MediaTek MT7987 RFB/EdgePi E87N/g' "$DTS_FILE"
+          
+          # 禁用双无线硬件节点（E87N无WiFi）
+          sed -i '/&wifi {/a\\tstatus = "disabled";' "$DTS_FILE"
+          sed -i '/&wifi_2_5g {/a\\tstatus = "disabled";' "$DTS_FILE"
+          
+          # 追加自定义硬件配置
+          cat >> "$DTS_FILE" << 'EOF'
+
+          /* 启用PWM硬件控制器 */
+          &pwm {
+              status = "okay";
+          };
+
+          /* PWM温控风扇 - 原厂硬件参数1:1匹配 */
+          / {
+              pwm_fan: pwm-fan {
+                  compatible = "pwm-fan";
+                  pwms = <&pwm 1 50000 0>;
+                  #cooling-cells = <2>;
+                  cooling-levels = <0 10 20 30 40 50 60 70 80 90 100 110 120 130 140 150 160 170 180 190 200 220 240 250 255>;
+                  status = "okay";
+              };
+          };
+
+          /* 启用SPI2总线（原厂显示插件硬件基础） */
+          &spi2 {
+              status = "okay";
+          };
+          EOF
+
+      - name: Add device to build config
+        run: |
+          cat >> target/linux/mediatek/image/filogic.mk << 'EOF'
+
+          define Device/edgepi_e87n
+            DEVICE_VENDOR := EdgePi
+            DEVICE_MODEL := E87N
+            DEVICE_DTS := mt7987-edgepi-e87n
+            DEVICE_PACKAGES := kmod-mtk-hnat luci-app-mtk luci-app-turboacc \
+              kmod-hwmon-pwmfan kmod-thermal \
+              -kmod-mt79 -kmod-mt76 -hostapd -wpad-basic -kmod-cfg80211 -wpad-openssl
+            IMAGES := emmc-gpt.img sysupgrade.bin
+            IMAGE/emmc-gpt.img := mt798x-emmc-img
+            IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
+            DEVICE_TYPE := router
+          endef
+          TARGET_DEVICES += edgepi_e87n
+          EOF
+
+      - name: Update and install feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Generate final build config
+        run: |
+          # 加载仓库原生MT7987优化配置
+          cp -f defconfig/mt7987_mt7992.config .config
+          
+          # 追加自定义配置
+          cat >> .config << 'EOF'
+          # 目标设备
+          CONFIG_TARGET_mediatek_filogic_DEVICE_edgepi_e87n=y
+          
+          # 固件标识
+          CONFIG_VERSION_DIST="E87N-ImmortalWrt"
+          CONFIG_TARGET_HOSTNAME="E87N-Router"
+          
+          # 闭源HNAT硬件加速
+          CONFIG_PACKAGE_kmod-mtk-hnat=y
+          CONFIG_PACKAGE_luci-app-mtk=y
+          
+          # 关闭软件转发，避免与HNAT冲突
+          CONFIG_PACKAGE_luci-app-turboacc=y
+          CONFIG_PACKAGE_kmod-fast-classifier=n
+          CONFIG_PACKAGE_kmod-shortcut-fe=n
+          CONFIG_PACKAGE_kmod-ipt-offload=n
+          
+          # 风扇驱动与温控
+          CONFIG_PACKAGE_kmod-hwmon-pwmfan=y
+          CONFIG_PACKAGE_kmod-thermal=y
+          
+          # 常用预装插件
+          CONFIG_PACKAGE_luci-app-ddns=y
+          CONFIG_PACKAGE_luci-app-upnp=y
+          CONFIG_PACKAGE_luci-app-statistics=y
+          CONFIG_PACKAGE_luci-app-autoreboot=y
+          CONFIG_PACKAGE_luci-app-fancontrol=y
+          CONFIG_PACKAGE_luci-app-timewol=y
+          CONFIG_PACKAGE_luci-app-nlbwmon=y
+          CONFIG_PACKAGE_iperf3=y
+          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_tcpdump=y
+          
+          # 移除无线内核组件
+          CONFIG_PACKAGE_kmod-cfg80211=n
+          CONFIG_PACKAGE_kmod-mac80211=n
+          CONFIG_PACKAGE_kmod-mt76=n
+          CONFIG_PACKAGE_kmod-mt79=n
+          EOF
+          
+          # 追加日期版本号
+          echo "CONFIG_VERSION_NUMBER=\"$(date +%Y%m%d)\"" >> .config
+          
+          # 替换固件内置opkg源为清华大学镜像
+          sed -i 's|https://downloads.immortalwrt.org|https://mirrors.tuna.tsinghua.edu.cn/immortalwrt|g' package/base-files/files/etc/opkg/distfeeds.conf
+          
+          # 自动补全所有依赖
+          make defconfig
+
+      - name: Download all sources
+        run: |
+          make download -j$(nproc)
+
+      - name: Build firmware
+        run: |
+          make -j$(nproc) V=s
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: E87N-ImmortalWrt-6.6-firmware
+          path: bin/targets/mediatek/filogic/*edgepi_e87n*
