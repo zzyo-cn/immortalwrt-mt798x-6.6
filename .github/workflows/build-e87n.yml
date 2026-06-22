@@ -31,21 +31,17 @@ jobs:
           DTS_DIR="target/linux/mediatek/files-6.6/arch/arm64/boot/dts/mediatek"
           DTS_FILE="$DTS_DIR/mt7987-edgepi-e87n.dts"
           
-          # 列出所有MT7987原生模板，运行后可在日志中确认
+          # 列出所有MT7987原生模板，方便兜底选
           echo "=== 内核内置MT7987设备树列表 ==="
           ls -la $DTS_DIR/mt7987*.dts
           echo "=================================="
           
-          # 使用MT7987官方参考板模板（外设寄存器与E87N完全匹配）
+          # 使用MT7987官方参考板模板
           cp $DTS_DIR/mt7987-rfb.dts "$DTS_FILE"
           
           # 修改设备标识与兼容字符串
           sed -i 's/mediatek,mt7987-rfb/edgepi,e87n/g' "$DTS_FILE"
           sed -i 's/MediaTek MT7987 RFB/EdgePi E87N/g' "$DTS_FILE"
-          
-          # 禁用双无线硬件节点（E87N无WiFi）
-          sed -i '/&wifi {/a\\tstatus = "disabled";' "$DTS_FILE"
-          sed -i '/&wifi_2_5g {/a\\tstatus = "disabled";' "$DTS_FILE"
           
           # 追加自定义硬件配置
           cat >> "$DTS_FILE" << 'EOF'
@@ -82,7 +78,7 @@ jobs:
             DEVICE_DTS := mt7987-edgepi-e87n
             DEVICE_PACKAGES := kmod-mtk-hnat luci-app-mtk luci-app-turboacc \
               kmod-hwmon-pwmfan kmod-thermal \
-              -kmod-mt79 -kmod-mt76 -hostapd -wpad-basic -kmod-cfg80211 -wpad-openssl
+              -hostapd -wpad-basic -wpad-openssl
             IMAGES := emmc-gpt.img sysupgrade.bin
             IMAGE/emmc-gpt.img := mt798x-emmc-img
             IMAGE/sysupgrade.bin := sysupgrade-tar | append-metadata
@@ -93,6 +89,10 @@ jobs:
 
       - name: Update and install feeds
         run: |
+          # 可选：追加第三方插件源（预装fancontrol/timewol等需要）
+          # echo "src-git kenzo https://github.com/kenzok8/openwrt-packages" >> feeds.conf.default
+          # echo "src-git small https://github.com/kenzok8/small" >> feeds.conf.default
+          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -128,9 +128,6 @@ jobs:
           CONFIG_PACKAGE_luci-app-ddns=y
           CONFIG_PACKAGE_luci-app-upnp=y
           CONFIG_PACKAGE_luci-app-statistics=y
-          CONFIG_PACKAGE_luci-app-autoreboot=y
-          CONFIG_PACKAGE_luci-app-fancontrol=y
-          CONFIG_PACKAGE_luci-app-timewol=y
           CONFIG_PACKAGE_luci-app-nlbwmon=y
           CONFIG_PACKAGE_iperf3=y
           CONFIG_PACKAGE_ethtool=y
@@ -146,8 +143,10 @@ jobs:
           # 追加日期版本号
           echo "CONFIG_VERSION_NUMBER=\"$(date +%Y%m%d)\"" >> .config
           
-          # 替换固件内置opkg源为清华大学镜像
-          sed -i 's|https://downloads.immortalwrt.org|https://mirrors.tuna.tsinghua.edu.cn/immortalwrt|g' package/base-files/files/etc/opkg/distfeeds.conf
+          # 安全替换固件内置opkg源为清华镜像
+          if [ -f package/base-files/files/etc/opkg/distfeeds.conf ]; then
+            sed -i 's|https://downloads.immortalwrt.org|https://mirrors.tuna.tsinghua.edu.cn/immortalwrt|g' package/base-files/files/etc/opkg/distfeeds.conf
+          fi
           
           # 自动补全所有依赖
           make defconfig
